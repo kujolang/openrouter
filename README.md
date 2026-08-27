@@ -18,8 +18,20 @@ export OPENROUTER_API_KEY=your-key
 
 ```kujo
 from openrouter import create_client, client_chat
+
 client := create_client({})
-result := client_chat(client, {"model":"openai/gpt-5.5","messages":[{"role":"user","content":"Hello from Kujo!"}]})
+request := {
+    "model": "openai/gpt-5.5",
+    "messages": [
+        {
+            "role": "user",
+            "content": "Hello from Kujo!"
+        }
+    ]
+}
+
+result := client_chat(client, request)
+
 print(result["data"]["choices"][0]["message"]["content"])
 ```
 
