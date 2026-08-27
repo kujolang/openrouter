@@ -1,0 +1,1 @@
+Root exports are in `openrouter.kujo`; native OpenRouter code is `src/openrouter.kujo`; the AI SDK driver is `src/provider.kujo`. Run `bash scripts/release_quality_gate.sh`. Preserve routing/provider metadata, use immutable dependencies, and do not modify AI SDK core.

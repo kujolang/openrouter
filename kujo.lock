@@ -1,0 +1,7 @@
+schema_version = 1
+
+[package]
+name = "openrouter"
+version = "0.1.0"
+
+[dependencies]
