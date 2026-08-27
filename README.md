@@ -9,7 +9,10 @@ OpenRouter routing and model-catalog support for Kujo, using its OpenAI-compatib
 ## Install
 
 ```bash
-kujo run /path/to/kennel/kennel.kujo --interpreter -- add github:kujolang/openrouter@v0.1.2 --alias openrouter
+kujo run /path/to/kennel/kennel.kujo \
+  --interpreter \
+  -- add github:kujolang/openrouter@v0.1.2 \
+  --alias openrouter
 kujo run /path/to/kennel/kennel.kujo --interpreter -- install
 export OPENROUTER_API_KEY=your-key
 ```
