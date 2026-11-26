@@ -1,3 +1,69 @@
-test_setup { from src.provider import openrouter_provider, openrouter_driver }
+test_setup { from src.provider import openrouter_provider, openrouter_driver; from src.ai_sdk import create_client, chat_completion, chat_completion_stream }
 test "compatible driver preserves routing" { p:=openrouter_provider({"model":"openai/test"}); d:=openrouter_driver(); e:=d["encode_chat"]({"provider":p,"credential":"secret","messages":[{"role":"user","content":"hi"}],"resolved_options":{"model":"openai/test","provider":{"zdr":true}}}); assert_equal(contains(e["url"],"chat/completions"),1); assert_equal(contains(e["body"],"zdr"),1) }
 test "driver maps chat response and usage" { r:=openrouter_driver()["decode_chat"]({"fallback_model":"m","data":{"model":"m","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}}); assert_equal(r["output_text"],"ok"); assert_equal(r["usage"]["total_tokens"],6) }
+
+test "SDK applies OpenRouter routing constraints and keeps full tool history" {
+    provider := openrouter_provider({"base_url":"https://gateway.example/v1/","model":"fixture","app_title":"Fixture app"})
+    assert_equal(provider["api_key_env"],"")
+    client := create_client(provider,"fixture-key")
+    transport := func(url,options) {
+        assert_equal(url,"https://gateway.example/v1/chat/completions")
+        assert_equal(options["redirects"],"none")
+        assert_equal(options["_headers"]["Authorization"],"Bearer fixture-key")
+        assert_equal(options["_headers"]["X-Title"],"Fixture app")
+        assert_equal(has_key(options["_headers"],"Host"),0)
+        body := parse_json(options["_body"])
+        assert_true(body["provider"]["zdr"])
+        assert_false(body["provider"]["allow_fallbacks"])
+        assert_equal(body["models"],["test/alternate"])
+        assert_equal(body["reasoning"]["effort"],"medium")
+        assert_equal(body["messages"][1]["tool_call_id"],"call-1")
+        assert_equal(body["response_format"]["type"],"json_object")
+        return Ok({"_status":200,"_body":"{\"id\":\"gen-1\",\"provider\":\"Fixture provider\",\"choices\":[{\"message\":{\"content\":\"{}\",\"tool_calls\":null},\"finish_reason\":\"stop\",\"native_finish_reason\":\"eos\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7,\"cost\":0.002}}"})
+    }
+    messages := [{"role":"assistant","content":"","tool_calls":[{"id":"call-1","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","content":"fixture","tool_call_id":"call-1"}]
+    opts := {
+        "transport":transport,"max_retries":0,"headers":{"Host":"ignored.example"},
+        "provider":{"zdr":true,"allow_fallbacks":false},"models":["test/alternate"],"reasoning":{"effort":"medium"},
+        "response_format":{"type":"json_object"},
+    }
+    result := chat_completion(client,messages,opts)
+    assert_true(result["ok"])
+    assert_equal(result["request_id"],"gen-1")
+    assert_equal(result["usage"]["cost"],0.002)
+    assert_equal(result["raw"]["provider"],"Fixture provider")
+    assert_equal(result["raw"]["choices"][0]["native_finish_reason"],"eos")
+}
+
+test "SDK streaming preserves OpenRouter usage, reasoning details and tool deltas" {
+    client := create_client(openrouter_provider({"model":"fixture"}),"fixture-key")
+    transport := func(url,options) {
+        assert_equal(options["redirects"],"none")
+        body := parse_json(options["_body"])
+        assert_true(body["usage"]["include"])
+        return Ok({"_status":200,"_stream_chunks":[
+            ": OPENROUTER PROCESSING\r\n\r\ndata: {\"id\":\"gen-stream\",\"provider\":\"Fixture provider\",\"choices\":[{\"delta\":{\"content\":\"hello\",\"reasoning_details\":[{\"type\":\"reasoning.summary\",\"summary\":\"fixture\"}],\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\"}}]}}]}\r",
+            "\n\r\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\r\n\r\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7,\"cost\":0.003,\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\ndata: [DONE]\n\n",
+        ]})
+    }
+    result := chat_completion_stream(client,[{"role":"user","content":"hi"}],{"transport":transport,"max_retries":0,"usage":{"include":true}},null)
+    assert_true(result["ok"])
+    assert_equal(result["request_id"],"gen-stream")
+    assert_equal(result["output_text"],"hello")
+    assert_equal(result["finish_reason"],"tool_calls")
+    assert_equal(result["tool_calls"][0]["function"]["arguments"],"{}")
+    assert_equal(result["usage"]["cost"],0.003)
+    assert_equal(result["usage"]["reasoning_tokens"],1)
+    assert_equal(result["raw"]["stream_events"][0]["choices"][0]["delta"]["reasoning_details"][0]["summary"],"fixture")
+}
+
+test "SDK decoders reject provider error endings and preserve structured errors" {
+    driver := openrouter_driver()
+    assert_false(driver["decode_chat"]({"data":{"choices":[{"message":{"content":"partial"},"finish_reason":"error"}]}})["ok"])
+    assert_false(driver["decode_stream"]({"body_text":"data: {\"choices\":[{\"finish_reason\":\"error\"}],\"error\":{\"message\":\"provider failed\"}}\n\ndata: [DONE]\n\n"})["ok"])
+    response := driver["decode_error"]({"status_code":401,"data":{"error":{"message":"denied","code":401,"metadata":{"provider_name":"fixture"}}}})
+    assert_equal(response["category"],"auth")
+    assert_equal(response["provider_code"],401)
+    assert_equal(response["raw_provider"]["error"]["metadata"]["provider_name"],"fixture")
+}

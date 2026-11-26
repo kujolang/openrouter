@@ -22,11 +22,11 @@ Native client: `src/openrouter.kujo`; AI SDK adapter: `src/provider.kujo`; root 
 
 ## Kujo Requirement / AI SDK Dependency
 
-Kujo >= 1.0.2; `github:kujolang/ai-sdk@v1.1.0`.
+The current source requires Kujo 1.6.0 or later. Kennel pins AI SDK commit `f3126dded28102f40d0ddecd50a559105c66f905`.
 
-## Authentication / Native Semantics / Streaming
+## Authentication, native semantics, and streaming
 
-Bearer `OPENROUTER_API_KEY`, optional protected `HTTP-Referer` and `X-Title`, HTTPS enforcement, URL credential rejection, redaction, and OpenAI-compatible SSE parsing. Routing remains in the native request body.
+Both paths scope ambient bearer credentials to the OpenRouter origin and disable redirects. The native model catalog preserves its Result type. Chat can stream bounded SSE with keepalive comments, a terminal choice, and the final marker. SDK request options preserve provider routing, data retention preferences, and tool turns. The adapter retains terminal cost and usage alongside raw provider and reasoning details. [OpenRouter streaming](https://openrouter.ai/docs/api_reference/streaming) · [Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
 
 ## Tools / Structured Output / Reasoning / Multimodal / Embeddings
 

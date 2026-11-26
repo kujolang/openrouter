@@ -8,6 +8,8 @@ OpenRouter routing and model-catalog support for Kujo, using its OpenAI-compatib
 
 ## Install
 
+The current source requires Kujo 1.6.0 or later. The commands below install the published v0.1.2 release.
+
 ```bash
 kujo run /path/to/kennel/kennel.kujo \
   -- add github:kujolang/openrouter@v0.1.2 \
@@ -47,7 +49,7 @@ The native client preserves model discovery, provider routing and preferences, f
 
 ## Authentication and security
 
-Set `OPENROUTER_API_KEY`. Remote endpoints require HTTPS; credentials are redacted and never included in provider metadata or fixtures.
+Set `OPENROUTER_API_KEY` for the official OpenRouter origin. Supply a gateway’s own key explicitly when configuring another HTTPS origin. Both clients disable redirects. The native client bounds response bodies and redacts the configured key from parsed and raw receipts.
 
 ## Testing and documentation
 

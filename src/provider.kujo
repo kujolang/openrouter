@@ -1,11 +1,160 @@
-func get(o,k,f) { if type(o)=="dict" && has_key(o,k) { return o[k] }; return f }
-func provider_impl(config) { if type(config)!="dict" { config:={} }; return {"name":"openrouter","base_url":get(config,"base_url","https://openrouter.ai/api/v1"),"default_model":get(config,"model",""),"api_key_env":"OPENROUTER_API_KEY","capabilities":{"streaming":true,"tool_calls":true,"structured_output":true},"driver":driver()} }
-func describe(p) { return {"id":"openrouter-compatible","protocol":"openai-chat-completions","auth":{"mode":"bearer","allow_anonymous":false},"capabilities":p["capabilities"]} }
-func validate(p) { if type(p)!="dict" || get(p,"base_url","")=="" { return {"ok":false,"errors":[{"field":"base_url","message":"OpenRouter provider requires a base URL."}]}}; return {"ok":true,"errors":[]} }
-func encode_chat(ctx) { o:=ctx["resolved_options"]; msgs:=[]; for m in ctx["messages"] { msgs=push(msgs,{"role":get(m,"role","user"),"content":get(m,"content","")}) }; body:={"model":get(o,"model",get(ctx["provider"],"default_model","")),"messages":msgs,"stream":get(o,"stream",false)}; for k in ["tools","tool_choice","response_format","temperature","top_p","max_tokens","reasoning","provider"] { if has_key(o,k) { body[k]:=o[k] } }; return {"url":ctx["provider"]["base_url"]+"/chat/completions","method":"POST","headers":{"Authorization":"Bearer "+ctx["credential"],"Content-Type":"application/json"},"protected_headers":["Authorization","Content-Type"],"body":to_json(body),"stream_mode":get(o,"stream",false)} }
-func decode_chat(ctx) { d:=ctx["data"]; c:={}; if len(get(d,"choices",[]))>0 { c:=d["choices"][0] }; m:=get(c,"message",{}); u:=get(d,"usage",{}); return {"ok":true,"request_id":get(ctx,"request_id",""),"model":get(d,"model",get(ctx,"fallback_model","")),"output_text":get(m,"content",""),"finish_reason":get(c,"finish_reason","stop"),"tool_calls":get(m,"tool_calls",[]),"usage":{"input_tokens":get(u,"prompt_tokens",0),"output_tokens":get(u,"completion_tokens",0),"total_tokens":get(u,"total_tokens",0)},"raw_provider":d} }
-func decode_error(ctx) { d:=ctx["data"]; if type(d)!="dict" || !has_key(d,"error") { return {"ok":false,"matched":false} }; e:=d["error"]; return {"ok":false,"matched":true,"category":"provider","message":get(e,"message","OpenRouter request failed"),"provider_code":get(e,"code","openrouter_error"),"raw_provider":d} }
-func decode_stream(ctx) { p:=parse_stream(get(ctx,"chunks",[]),get(ctx,"body_text","")); if !p["ok"] { return p }; text:=""; for e in p["events"] { c:=get(get(e,"choices",[]),0,{}); text:=text+get(get(c,"delta",{}),"content","") }; return {"ok":true,"output_text":text,"finish_reason":"stop","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"raw_provider":{"stream_events":p["events"]}} }
-func driver() { return {"contract":"ai-sdk-provider-driver","version":"1.0.0","id":"openrouter-compatible","describe":describe,"validate":validate,"encode_chat":encode_chat,"decode_chat":decode_chat,"decode_error":decode_error,"decode_stream":decode_stream} }
-export openrouter_provider:=provider_impl
-export openrouter_driver:=driver
+from src.openrouter import openrouter_endpoint, openrouter_base, parse_stream, openrouter_provider_error, openrouter_failure_message, openrouter_hosted, openrouter_attribution
+from src.ai_sdk import normalize_non_stream_success, normalize_stream_success
+
+func get(value,key,fallback) {
+    if type(value) == "dict" && has_key(value,key) { return value[key] }
+    return fallback
+}
+
+func provider_impl(config) {
+    base := openrouter_endpoint(get(config,"base_url",openrouter_base))
+    credential_env := ""
+    if openrouter_hosted(base) { credential_env = "OPENROUTER_API_KEY" }
+    return {
+        "name":"openrouter",
+        "base_url":base,"http_referer":get(config,"http_referer",""),"app_title":get(config,"app_title",""),
+        "default_model":get(config,"model",""),
+        "api_key_env":credential_env,
+        "package_provider":true,
+        "stream_usage":false,
+        "capabilities":{"streaming":true,"tool_calls":true,"structured_output":true,"json_mode":true,"json_schema":true,"vision":true,"reasoning":true},
+        "driver":driver(),
+    }
+}
+
+func describe(provider) {
+    return {
+        "id":"openrouter-compatible",
+        "protocol":"openai-chat-completions",
+        "auth":{"mode":"bearer","allow_anonymous":false},
+        "capabilities":provider["capabilities"],
+    }
+}
+
+func validate(provider,endpoint,field) {
+    if endpoint(field(provider,"base_url","")) == "" {
+        return {"ok":false,"errors":[{"field":"base_url","message":"OpenRouter base URL must be HTTPS."}]}
+    }
+    return {"ok":true,"errors":[]}
+}
+
+func encode_chat(context,attribution) {
+    provider := context["provider"]
+    options := get(context,"options",{})
+    resolved := context["resolved_options"]
+    prepared := get(context,"payload",{})
+    payload := {
+        "model":get(prepared,"model",get(resolved,"model",get(provider,"default_model",""))),
+        "messages":get(prepared,"messages",context["messages"]),
+        "stream":get(prepared,"stream",get(resolved,"stream",false)),
+    }
+    for key in [
+        "tools","tool_choice","response_format","temperature","top_p","max_tokens","max_completion_tokens",
+        "frequency_penalty","presence_penalty","repetition_penalty","parallel_tool_calls","stop","seed",
+        "provider","models","route","reasoning","usage","plugins","transforms","logprobs","top_logprobs",
+        "top_k","min_p","top_a","prediction","verbosity","user","modalities","service_tier","stream_options",
+    ] {
+        if key == "stream_options" && payload["stream"] != true { continue }
+        if has_key(prepared,key) { payload[key] := prepared[key] }
+        else if has_key(options,key) { payload[key] := options[key] }
+        else if has_key(resolved,key) { payload[key] := resolved[key] }
+    }
+    headers := {"Authorization":"Bearer "+context["credential"],"Content-Type":"application/json"}
+    headers = attribution(headers,get(options,"http_referer",provider["http_referer"]),get(options,"app_title",provider["app_title"]))
+    if headers == null { return null }
+    if payload["stream"] == true { headers["Accept"] := "text/event-stream" }
+    return {
+        "url":provider["base_url"]+"/chat/completions",
+        "method":"POST","headers":headers,"protected_headers":["Authorization","Content-Type"],
+        "body":to_json(payload),"stream_mode":payload["stream"],
+    }
+}
+
+func preserve_cost(result,record,field) {
+    usage := result["usage"]
+    for key in ["cost","upstream_inference_cost"] {
+        amount := field(record,key,null)
+        if (type(amount) == "float" || type(amount) == "int") && amount >= 0 && amount-amount == 0 {
+            usage[key] := amount
+        }
+    }
+    result["usage"] = usage
+    return result
+}
+
+func decode_chat(context,normalize,field,failed,account) {
+    data := field(context,"data",null)
+    if type(data) != "dict" || failed(data) { return {"ok":false} }
+    choices := field(data,"choices",null)
+    if type(choices) != "array" || len(choices) == 0 || type(field(choices[0],"message",null)) != "dict" {
+        return {"ok":false}
+    }
+    result := normalize({"provider":{"name":"openrouter"}},field(context,"status_code",0),data,field(context,"fallback_model",""))
+    if result["request_id"] == "" { result["request_id"] = field(context,"request_id","") }
+    if field(choices[0]["message"],"tool_calls",null) == null { result["tool_calls"] = [] }
+    if result["finish_reason"] == null { result["finish_reason"] = "" }
+    result["raw_provider"] = data
+    return account(result,field(data,"usage",{}),field)
+}
+
+func decode_error(context,field,failed,message_for) {
+    data := field(context,"data",null)
+    if !failed(data) { return {"ok":false,"matched":false} }
+    status := field(context,"status_code",0)
+    category := "provider"
+    if status == 401 || status == 403 { category = "auth" }
+    return {
+        "ok":false,"matched":true,"category":category,"message":message_for(data),
+        "provider_code":field(field(data,"error",data),"code","openrouter_error"),"raw_provider":data,
+    }
+}
+
+func decode_stream(context,parse,normalize,field,failed,account) {
+    parsed := parse(field(context,"chunks",[]),field(context,"body_text",""))
+    if !parsed["ok"] || !parsed["complete"] || len(parsed["events"]) == 0 { return {"ok":false} }
+    events := parsed["events"]
+    terminal := false
+    usage := {}
+    for event in events {
+        if type(field(event,"usage",null)) == "dict" { usage = event["usage"] }
+        if failed(event) { return {"ok":false} }
+        choices := field(event,"choices",[])
+        if type(choices) != "array" { return {"ok":false} }
+        if len(choices) > 0 {
+            reason := field(choices[0],"finish_reason","")
+            if type(reason) == "string" && reason != "" { terminal = true }
+        }
+    }
+    if !terminal { return {"ok":false} }
+    result := normalize({"provider":{"name":"openrouter"}},field(context,"status_code",0),events,field(context,"fallback_model",""))
+    result["raw_provider"] = result["raw"]
+    return account(result,usage,field)
+}
+
+func driver() {
+    field := get
+    endpoint := openrouter_endpoint
+    failed := openrouter_provider_error
+    message_for := openrouter_failure_message
+    normalize_chat := normalize_non_stream_success
+    normalize_stream := normalize_stream_success
+    parser := parse_stream
+    attribution := openrouter_attribution
+    chat_encoder := encode_chat
+    account := preserve_cost
+    validate_provider := validate
+    chat_decoder := decode_chat
+    error_decoder := decode_error
+    stream_decoder := decode_stream
+    return {
+        "contract":"ai-sdk-provider-driver","version":"1.0.0","id":"openrouter-compatible",
+        "describe":describe,"encode_chat":func(context) { return chat_encoder(context,attribution) },
+        "validate":func(provider) { return validate_provider(provider,endpoint,field) },
+        "decode_chat":func(context) { return chat_decoder(context,normalize_chat,field,failed,account) },
+        "decode_error":func(context) { return error_decoder(context,field,failed,message_for) },
+        "decode_stream":func(context) { return stream_decoder(context,parser,normalize_stream,field,failed,account) },
+    }
+}
+
+export openrouter_provider := provider_impl
+export openrouter_driver := driver
