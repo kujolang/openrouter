@@ -1,3 +1,58 @@
-test_setup { from src.openrouter import create_client, client_chat, parse_stream }
+test_setup { from src.openrouter import create_client, client_chat, client_models, parse_stream }
 test "client validates host and routing headers" { c:=create_client({"api_key":"secret","http_referer":"https://example.test","app_title":"Kujo","transport":func(url,o) { assert_equal(o["_headers"]["Authorization"],"Bearer secret"); assert_equal(o["_headers"]["X-Title"],"Kujo"); return Ok({"_status":200,"_body":"{\"choices\":[]}"}) }}); assert_true(client_chat(c,{"model":"m","provider":{"zdr":true}})["ok"]); assert_true(create_client({"base_url":"http://remote.example"})["validation_error"]!="") }
 test "stream parser and redaction" { p:=parse_stream(["data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n","data: [DONE]\n\n"],""); assert_true(p["ok"]); assert_equal(len(p["events"]),1); c:=create_client({"api_key":"secret","transport":func(url,o) { return Ok({"_status":401,"_body":"{\"error\":{\"message\":\"secret denied\"}}"}) }}); r:=client_chat(c,{}); assert_equal(contains(r["message"],"secret"),0) }
+
+test "native scoped credentials, attribution validation and model discovery retain their contract" {
+    hosted := create_client({"base_url":"https://gateway.example:8443/v1/"})
+    assert_equal(hosted["api_key"],"")
+    for config in [
+        {"base_url":"https://gateway.example:65536"},
+        {"base_url":"https://gateway.example/../v1"},
+        {"base_url":4},
+        {"api_key":"fixture","app_title":"bad\nheader"},
+        {"api_key":"fixture","http_referer":"https://example.test/fixture"},
+    ] {
+        config["transport"] := func(u,o) { return Err("unexpected request") }
+        result := client_chat(create_client(config),{})
+        assert_false(result["ok"])
+        assert_true(result["message"] != "unexpected request")
+    }
+    client := create_client({"base_url":"https://gateway.example:8443/v1/","transport":func(url,opts) {
+        assert_equal(url,"https://gateway.example:8443/v1/models")
+        assert_equal(opts["method"],"GET")
+        assert_equal(opts["redirects"],"none")
+        assert_equal(has_key(opts["_headers"],"Authorization"),0)
+        return Ok({"_status":200,"_body":"{\"data\":[{\"id\":\"example/test\"}]}"})
+    }})
+    match client_models(client) {
+        case Ok(response): { assert_equal(parse_json(response["_body"])["data"][0]["id"],"example/test") }
+        case Err(error): { assert_true(false) }
+    }
+}
+
+test "native redacts escaped response data and raw response headers" {
+    client := create_client({"api_key":"fixture-secret","transport":func(url,opts) {
+        assert_equal(opts["max_response_bytes"],8388608)
+        return Ok({"_status":200,"_body":"{\"choices\":[],\"id\":\"fixture-\\u0073ecret\"}","_headers":{"x-fixture-secret":"fixture-secret"}})
+    }})
+    result := client_chat(client,{})
+    assert_true(result["ok"])
+    assert_equal(result["data"]["id"],"[REDACTED]")
+    assert_equal(result["response"]["_headers"]["x-[REDACTED]"],"[REDACTED]")
+    assert_equal(contains(to_json(result),"fixture-secret"),0)
+}
+
+test "native chat streams handle keepalives and reject truncation and errors" {
+    client := create_client({"api_key":"fixture-secret","transport":func(url,opts) {
+        assert_true(opts["stream"])
+        return Ok({"_status":200,"_stream_chunks":[],"_body":": OPENROUTER PROCESSING\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\r\n\r\ndata: [DONE]\r\n\r\n"})
+    }})
+    result := client_chat(client,{"stream":true})
+    assert_true(result["ok"])
+    assert_equal(result["events"][0]["choices"][0]["delta"]["content"],"ok")
+    interrupted := create_client({"api_key":"fixture-secret","transport":func(url,opts) {
+        return Ok({"_status":200,"_body":"data: {\"choices\":[{\"delta\":{\"content\":\"unfinished\"}}]}\n\n"})
+    }})
+    assert_false(client_chat(interrupted,{"stream":true})["ok"])
+    assert_false(parse_stream([2],"")["ok"])
+}
